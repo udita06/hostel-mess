@@ -338,11 +338,16 @@ export default function ProfileView({
           <div className="bg-white rounded-2xl p-6 border border-gray-200 shadow-sm">
             <div className="flex items-center justify-between pb-4 border-b border-gray-100">
               <div>
-                <h4 className="text-base font-bold text-gray-900">
-                  User Directory ({users.length} Users)
-                </h4>
+                <div className="flex items-center gap-2">
+                  <h4 className="text-base font-bold text-gray-900">
+                    User Directory ({users.length} Users)
+                  </h4>
+                  <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded-full border border-emerald-300">
+                    🍃 MongoDB Atlas
+                  </span>
+                </div>
                 <p className="text-xs text-gray-500">
-                  Manage resident students, update information, and modify meal preferences.
+                  Manage resident students (name, email, room number, year), update information, and modify meal preferences.
                 </p>
               </div>
             </div>

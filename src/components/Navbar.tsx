@@ -17,6 +17,7 @@ import {
   Sparkles,
   RefreshCw,
   Bell,
+  Database,
 } from 'lucide-react';
 
 interface NavbarProps {
@@ -32,7 +33,7 @@ export default function Navbar({
 }: NavbarProps) {
   const { user, isAdmin, logout, switchUser } = useAuth();
   const { currentTime, timeMode, setTimeMode, resetToRealTime, isSimulated } = useAppTime();
-  const { users, overrides } = useMessData();
+  const { users, overrides, dbConnected } = useMessData();
 
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showTimeModal, setShowTimeModal] = useState(false);
@@ -69,8 +70,29 @@ export default function Navbar({
                 <span className="font-bold text-gray-900 text-lg tracking-tight">
                   Hostel Mess
                 </span>
-                <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
-                  Vercel Live
+                <span
+                  title={
+                    dbConnected
+                      ? 'Connected to MongoDB Atlas database (mess.dljvhqz.mongodb.net)'
+                      : 'Connecting to MongoDB Atlas...'
+                  }
+                  className={`text-[11px] font-semibold px-2 py-0.5 rounded-full flex items-center gap-1.5 transition-colors ${
+                    dbConnected
+                      ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                      : 'bg-amber-100 text-amber-800 border border-amber-300'
+                  }`}
+                >
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full ${
+                      dbConnected
+                        ? 'bg-emerald-600 animate-pulse'
+                        : 'bg-amber-600'
+                    }`}
+                  />
+                  <Database className="w-3 h-3" />
+                  <span className="hidden sm:inline">
+                    {dbConnected ? 'MongoDB Atlas Live' : 'Connecting DB'}
+                  </span>
                 </span>
               </div>
               <p className="text-xs text-gray-500 hidden sm:block">

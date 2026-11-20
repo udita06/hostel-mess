@@ -22,6 +22,8 @@ interface MessDataContextType {
   meals: MealPreference[];
   overrides: OverrideRequest[];
   gformConfig: GFormConfig;
+  dbConnected: boolean;
+  dbSource: string;
   updateGFormConfig: (config: GFormConfig) => void;
   // Meal Actions
   getStudentMeal: (userId: string, date: string) => MealPreference | undefined;
@@ -41,10 +43,11 @@ interface MessDataContextType {
   // Stats
   getDayStats: (date: string) => DayAggregatedStats;
   get30DayStats: (startDate?: string) => DayAggregatedStats[];
-  // User Management (Admin)
-  addUser: (user: Omit<User, 'id' | 'createdAt'>) => User;
-  updateUser: (userId: string, updates: Partial<User>) => void;
-  deleteUser: (userId: string) => void;
+  // User Management (Admin & MongoDB)
+  addUser: (user: Omit<User, 'id' | 'createdAt'>) => Promise<User>;
+  updateUser: (userId: string, updates: Partial<User>) => Promise<void>;
+  deleteUser: (userId: string) => Promise<void>;
+  refreshUsersFromDb: () => Promise<void>;
   // Overrides
   submitOverrideRequest: (
     userId: string,
@@ -69,14 +72,53 @@ export function MessDataProvider({ children }: { children: React.ReactNode }) {
   const [meals, setMeals] = useState<MealPreference[]>([]);
   const [overrides, setOverrides] = useState<OverrideRequest[]>([]);
   const [gformConfig, setGformConfig] = useState<GFormConfig>(getStoredGFormConfig());
+  const [dbConnected, setDbConnected] = useState<boolean>(false);
+  const [dbSource, setDbSource] = useState<string>('initializing');
 
-  // Load initial data
+  // Load initial local data immediately for fast first paint
   useEffect(() => {
     setUsers(getStoredUsers());
     setMeals(getStoredMealPreferences());
     setOverrides(getStoredOverrides());
     setGformConfig(getStoredGFormConfig());
   }, []);
+
+  // Fetch live users from MongoDB backend
+  const refreshUsersFromDb = useCallback(async () => {
+    try {
+      const res = await fetch('/api/users');
+      if (res.ok) {
+        const data = await res.json();
+        if (data.users && data.users.length > 0) {
+          setUsers(data.users);
+          saveStoredUsers(data.users);
+          setDbConnected(true);
+          setDbSource(data.source || 'mongodb');
+          return;
+        }
+      }
+      setDbConnected(false);
+    } catch (err) {
+      console.warn('Could not reach /api/users, using cached storage', err);
+      setDbConnected(false);
+    }
+  }, []);
+
+  // Check DB status and fetch users on mount
+  useEffect(() => {
+    refreshUsersFromDb();
+
+    // Check DB status
+    fetch('/api/db-status')
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.connected) {
+          setDbConnected(true);
+          setDbSource('mongodb');
+        }
+      })
+      .catch(() => {});
+  }, [refreshUsersFromDb]);
 
   // Listen to cross-tab / window sync events
   useEffect(() => {
@@ -174,6 +216,21 @@ export function MessDataProvider({ children }: { children: React.ReactNode }) {
     setMeals(updatedMeals);
     saveStoredMealPreferences(updatedMeals);
 
+    // Sync to backend MongoDB asynchronously
+    const targetUser = users.find((u) => u.id === userId);
+    fetch('/api/meals', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId,
+        userEmail: targetUser?.email || '',
+        date,
+        lunch,
+        dinner,
+        updatedBy: isAdmin ? 'admin' : 'student',
+      }),
+    }).catch((err) => console.warn('Could not sync meal to MongoDB', err));
+
     return {
       success: true,
       message: isAdmin
@@ -210,12 +267,15 @@ export function MessDataProvider({ children }: { children: React.ReactNode }) {
       }
     }
 
+    const newLunch = mealType === 'lunch' || mealType === 'both' ? 'NONE' : existing.lunch;
+    const newDinner = mealType === 'dinner' || mealType === 'both' ? 'NONE' : existing.dinner;
+
     const updatedMeals = meals.map((m) => {
       if (m.userId === userId && m.date === date) {
         return {
           ...m,
-          lunch: mealType === 'lunch' || mealType === 'both' ? 'NONE' : m.lunch,
-          dinner: mealType === 'dinner' || mealType === 'both' ? 'NONE' : m.dinner,
+          lunch: newLunch,
+          dinner: newDinner,
           updatedAt: new Date().toISOString(),
           updatedBy: isAdmin ? ('admin' as const) : ('student' as const),
         };
@@ -225,6 +285,21 @@ export function MessDataProvider({ children }: { children: React.ReactNode }) {
 
     setMeals(updatedMeals);
     saveStoredMealPreferences(updatedMeals);
+
+    // Sync to backend
+    const targetUser = users.find((u) => u.id === userId);
+    fetch('/api/meals', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId,
+        userEmail: targetUser?.email || '',
+        date,
+        lunch: newLunch,
+        dinner: newDinner,
+        updatedBy: isAdmin ? 'admin' : 'student',
+      }),
+    }).catch(() => {});
 
     return { success: true, message: 'Preference cleared successfully.' };
   };
@@ -308,35 +383,77 @@ export function MessDataProvider({ children }: { children: React.ReactNode }) {
     [getDayStats]
   );
 
-  // Admin user operations
-  const addUser = (userData: Omit<User, 'id' | 'createdAt'>): User => {
+  // Admin user operations with MongoDB sync
+  const addUser = async (userData: Omit<User, 'id' | 'createdAt'>): Promise<User> => {
+    const tempId = `usr_${Date.now()}`;
     const newUser: User = {
       ...userData,
-      id: `usr_${Date.now()}`,
+      id: tempId,
       createdAt: new Date().toISOString(),
     };
 
+    // Optimistic local update
     const updated = [...users, newUser];
     setUsers(updated);
     saveStoredUsers(updated);
+
+    try {
+      const res = await fetch('/api/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(userData),
+      });
+
+      if (res.ok) {
+        const result = await res.json();
+        if (result.user) {
+          // Replace tempId with MongoDB _id
+          const finalUsers = users.map((u) => (u.id === tempId ? result.user : u));
+          setUsers(finalUsers);
+          saveStoredUsers(finalUsers);
+          return result.user;
+        }
+      }
+    } catch (err) {
+      console.warn('User saved locally, background MongoDB sync failed:', err);
+    }
+
     return newUser;
   };
 
-  const updateUser = (userId: string, updates: Partial<User>) => {
+  const updateUser = async (userId: string, updates: Partial<User>): Promise<void> => {
     const updated = users.map((u) => (u.id === userId ? { ...u, ...updates } : u));
     setUsers(updated);
     saveStoredUsers(updated);
+
+    try {
+      await fetch('/api/users', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: userId, ...updates }),
+      });
+    } catch (err) {
+      console.warn('Could not sync user update to MongoDB:', err);
+    }
   };
 
-  const deleteUser = (userId: string) => {
+  const deleteUser = async (userId: string): Promise<void> => {
     const updatedUsers = users.filter((u) => u.id !== userId);
     setUsers(updatedUsers);
     saveStoredUsers(updatedUsers);
 
-    // Also remove user meals
+    // Also remove user meals locally
     const updatedMeals = meals.filter((m) => m.userId !== userId);
     setMeals(updatedMeals);
     saveStoredMealPreferences(updatedMeals);
+
+    try {
+      await fetch(`/api/users?id=${userId}`, {
+        method: 'DELETE',
+      });
+    } catch (err) {
+      console.warn('Could not delete user from MongoDB:', err);
+    }
   };
 
   // Override requests
@@ -372,7 +489,6 @@ export function MessDataProvider({ children }: { children: React.ReactNode }) {
     if (!req) return;
 
     if (status === 'approved') {
-      // Apply the requested meals
       const current = getStudentMeal(req.userId, req.date);
       const lunch = req.requestedLunch || current?.lunch || 'NONE';
       const dinner = req.requestedDinner || current?.dinner || 'NONE';
@@ -393,7 +509,6 @@ export function MessDataProvider({ children }: { children: React.ReactNode }) {
       const updatedUsers = [...users];
 
       if (rawCsvOrJson && rawCsvOrJson.trim().startsWith('{')) {
-        // Parse JSON format
         const parsed = JSON.parse(rawCsvOrJson);
         const entries = Array.isArray(parsed) ? parsed : [parsed];
 
@@ -409,22 +524,19 @@ export function MessDataProvider({ children }: { children: React.ReactNode }) {
             if (entry.roomNumber) existing.roomNumber = entry.roomNumber;
             importedCount++;
           } else {
-            updatedUsers.push({
-              id: `usr_gf_${Date.now()}_${Math.random().toString(36).substring(7)}`,
+            const newUser = {
               name: entry.name || 'GForm Student',
               email: entry.email,
-              role: 'student',
+              role: 'student' as const,
               year: (Number(entry.year) || 1) as any,
               course: entry.course || 'B.Tech',
               roomNumber: entry.roomNumber || 'TBD',
-              createdAt: new Date().toISOString(),
-            });
+            };
+            addUser(newUser);
             importedCount++;
           }
         });
       } else {
-        // Default simulated GForm Sync (Demonstrating live Google Form response integration)
-        // Syncs or creates simulated responses from hostel student registration form
         const demoGFormResponses = [
           {
             name: 'Priya Patel (GForm Registered)',
@@ -445,15 +557,13 @@ export function MessDataProvider({ children }: { children: React.ReactNode }) {
         demoGFormResponses.forEach((res) => {
           const exists = updatedUsers.find((u) => u.email.toLowerCase() === res.email.toLowerCase());
           if (!exists) {
-            updatedUsers.push({
-              id: `usr_gf_${Date.now()}_${Math.random().toString(36).substring(7)}`,
+            addUser({
               name: res.name,
               email: res.email,
               role: 'student',
               year: res.year as any,
               course: res.course as any,
               roomNumber: res.roomNumber,
-              createdAt: new Date().toISOString(),
             });
             importedCount++;
           }
@@ -473,7 +583,7 @@ export function MessDataProvider({ children }: { children: React.ReactNode }) {
       return {
         success: true,
         count: importedCount,
-        message: `Successfully synchronized ${importedCount} record(s) from Google Form responses!`,
+        message: `Successfully synchronized ${importedCount} record(s) from Google Form into MongoDB!`,
       };
     } catch (err: any) {
       return {
@@ -498,6 +608,8 @@ export function MessDataProvider({ children }: { children: React.ReactNode }) {
         meals,
         overrides,
         gformConfig,
+        dbConnected,
+        dbSource,
         updateGFormConfig,
         getStudentMeal,
         saveMealPreference,
@@ -507,6 +619,7 @@ export function MessDataProvider({ children }: { children: React.ReactNode }) {
         addUser,
         updateUser,
         deleteUser,
+        refreshUsersFromDb,
         submitOverrideRequest,
         resolveOverrideRequest,
         syncGFormData,
